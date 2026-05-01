@@ -87,7 +87,7 @@ def in_counter_zone(cx: int, cy: int) -> bool:
 
 # ── Video setup ───────────────────────────────────────────────────────────────
 # KEDIT1: Input file path
-video_path = "cafe.qt"
+video_path = "airport.qt"
 cap = cv2.VideoCapture(video_path)
 assert cap.isOpened(), "Error reading video file"
 
@@ -101,7 +101,7 @@ pose_model = YOLO("yolo11n-pose.pt")
 output_dir = "runs/detect/track_queue"
 os.makedirs(output_dir, exist_ok=True)
 # KEDIT2: Writing output file path
-output_path = os.path.join(output_dir, "cafe_output.avi")
+output_path = os.path.join(output_dir, "airport_output.avi")
 out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"MJPG"), fps, (w, h))
 
 print(f"Starting queue tracking... Output will be saved to {output_path}")
@@ -113,14 +113,9 @@ frame_count   = 0
 # Maps track_id → frame number when they were first detected (queue entry order)
 entry_order: dict[int, int] = {}
 
-# ── Persistent queue state ───────────────────────────────────────────────────
-# Once initialized, this dict locks in the confirmed queue members so the
-# "spot behind" never jumps to unrelated detections.
-# key = track_id, value = {cx, cy, box, entry, missing}
-confirmed_queue: dict[int, dict] = {}
-
-# How many consecutive frames a queue member can be undetected before eviction
-MISSING_FRAME_LIMIT = 30
+# Persisted queue direction vector (dx, dy) – unit vector from front → back.
+# None until a valid queue (≥2 people) is first observed.
+queue_direction: tuple[float, float] | None = None
 
 while cap.isOpened():
     success, frame = cap.read()
@@ -196,107 +191,91 @@ while cap.isOpened():
                         (cx - 30, cy + 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 2)
 
-    # ── Persistent queue update ───────────────────────────────────────────────
-    # Build a fast lookup of this frame's detections keyed by track_id
-    current_by_id = {p["id"]: p for p in queue_candidates}
+    # ── Queue clustering ──────────────────────────────────────────────────────
+    if queue_candidates:
+        clusters = []
+        for person in queue_candidates:
+            ph = person["box"][3] - person["box"][1]  # person height (pixels)
+            assigned = []
 
-    if not confirmed_queue:
-        # ── One-time initialization via greedy clustering ─────────────────
-        # Runs repeatedly until we find a valid cluster of ≥2 people.
-        if queue_candidates:
-            clusters: list[list[dict]] = []
-            for person in queue_candidates:
-                ph = person["box"][3] - person["box"][1]
-                assigned: list[int] = []
-                for i, cluster in enumerate(clusters):
-                    for comp in cluster:
-                        dist = math.hypot(person["cx"] - comp["cx"],
-                                          person["cy"] - comp["cy"])
-                        ch = comp["box"][3] - comp["box"][1]
-                        if dist < 1.8 * max(ph, ch):
-                            assigned.append(i)
-                            break
-                if not assigned:
-                    clusters.append([person])
-                else:
-                    first = assigned[0]
-                    clusters[first].append(person)
-                    for other in sorted(assigned[1:], reverse=True):
-                        clusters[first].extend(clusters[other])
-                        del clusters[other]
+            for i, cluster in enumerate(clusters):
+                for comp in cluster:
+                    dist = math.hypot(person["cx"] - comp["cx"],
+                                      person["cy"] - comp["cy"])
+                    ch = comp["box"][3] - comp["box"][1]
+                    if dist < 1.8 * max(ph, ch):
+                        assigned.append(i)
+                        break
 
-            valid_queues = [c for c in clusters if len(c) > 1]
-            if valid_queues:
-                # Lock in the largest cluster as the confirmed queue
-                for person in max(valid_queues, key=len):
-                    confirmed_queue[person["id"]] = {**person, "missing": 0}
-
-    else:
-        # ── Update positions of members already in the confirmed queue ─────
-        for tid in list(confirmed_queue.keys()):
-            if tid in current_by_id:
-                p = current_by_id[tid]
-                confirmed_queue[tid].update({
-                    "cx": p["cx"], "cy": p["cy"],
-                    "box": p["box"], "missing": 0,
-                })
+            if not assigned:
+                clusters.append([person])
             else:
-                # Member temporarily not detected – tolerate up to the limit
-                confirmed_queue[tid]["missing"] += 1
-                if confirmed_queue[tid]["missing"] > MISSING_FRAME_LIMIT:
-                    del confirmed_queue[tid]
+                first = assigned[0]
+                clusters[first].append(person)
+                for other in sorted(assigned[1:], reverse=True):
+                    clusters[first].extend(clusters[other])
+                    del clusters[other]
 
-        # ── Admit a new person only if they appear adjacent to the tail ───
-        # This prevents random seated / distant people from hijacking the spot.
-        if confirmed_queue:
-            sorted_q = sorted(confirmed_queue.values(), key=lambda p: p["entry"])
-            last     = sorted_q[-1]
-            last_h   = last["box"][3] - last["box"][1]
-            for tid, person in current_by_id.items():
-                if tid not in confirmed_queue:
-                    dist = math.hypot(person["cx"] - last["cx"],
-                                      person["cy"] - last["cy"])
-                    ph = person["box"][3] - person["box"][1]
-                    if dist < 2.0 * max(last_h, ph):
-                        confirmed_queue[tid] = {**person, "missing": 0}
+        # Only consider groups with more than one person as a queue
+        valid_queues = [c for c in clusters if len(c) > 1]
 
-    # ── Draw queue visualization ──────────────────────────────────────────────
-    if confirmed_queue:
-        sorted_queue = sorted(confirmed_queue.values(), key=lambda p: p["entry"])
-        last_person  = sorted_queue[-1]  # most recent joiner = back of queue
+        if valid_queues:
+            # Pick the largest queue
+            main_queue  = max(valid_queues, key=len)
+            # Sort by entry order: earliest entrant = front of queue,
+            # latest entrant = back of queue (queue-end)
+            sorted_queue = sorted(main_queue, key=lambda p: p["entry"])
+            last_person  = sorted_queue[-1]  # person who joined most recently
 
-        qx1, qy1, qx2, qy2 = last_person["box"]
-        last_w = qx2 - qx1
-        last_h = qy2 - qy1
+            qx1, qy1, qx2, qy2 = last_person["box"]
+            last_w = qx2 - qx1
+            last_h = qy2 - qy1
 
-        # ── Queue direction vector ────────────────────────────────────────
-        dx, dy = 0.0, 1.0  # default: straight down
-        if len(sorted_queue) >= 2:
-            first_person = sorted_queue[0]
-            dx = last_person["cx"] - first_person["cx"]
-            dy = last_person["cy"] - first_person["cy"]
-            length = math.hypot(dx, dy)
-            if length > 0:
-                dx, dy = dx / length, dy / length
+            # ── Queue direction vector ────────────────────────────────────
+            # • First detection  → bootstrap from full queue span (front→back)
+            # • Later frames     → refine using only the last two people
+            # • Queue shrinks to 1 → keep the previously stored direction
+            if queue_direction is None:
+                # Bootstrap on first ever valid queue
+                if len(sorted_queue) >= 2:
+                    ref_person = sorted_queue[0]
+                    raw_dx = last_person["cx"] - ref_person["cx"]
+                    raw_dy = last_person["cy"] - ref_person["cy"]
+                    length = math.hypot(raw_dx, raw_dy)
+                    queue_direction = (raw_dx / length, raw_dy / length) if length > 0 else (0.0, 1.0)
+                else:
+                    queue_direction = (0.0, 1.0)  # default: straight down
+            else:
+                # Refine using only the last two people in the queue
+                if len(sorted_queue) >= 2:
+                    second_last = sorted_queue[-2]
+                    raw_dx = last_person["cx"] - second_last["cx"]
+                    raw_dy = last_person["cy"] - second_last["cy"]
+                    length = math.hypot(raw_dx, raw_dy)
+                    if length > 0:
+                        queue_direction = (raw_dx / length, raw_dy / length)
+                # If len == 1: queue_direction is unchanged (held from last frame)
 
-        # ── "Spot behind" calculation ─────────────────────────────────────
-        distance = max(last_h, 50)
-        spot_cx  = int(last_person["cx"] + dx * distance)
-        spot_cy  = int(last_person["cy"] + dy * distance)
+            dx, dy = queue_direction
 
-        sx1 = int(spot_cx - last_w / 2)
-        sy1 = int(spot_cy - last_h / 2)
-        sx2 = int(spot_cx + last_w / 2)
-        sy2 = int(spot_cy + last_h / 2)
+            # ── "Spot behind" calculation ─────────────────────────────────
+            distance = max(last_h, 50)
+            spot_cx  = int(last_person["cx"] + dx * distance)
+            spot_cy  = int(last_person["cy"] + dy * distance)
 
-        # Draw target spot (green, thick)
-        cv2.rectangle(annotated_frame, (sx1, sy1), (sx2, sy2), (0, 255, 0), 4)
-        cv2.putText(annotated_frame, "Spot behind",
-                    (sx1, max(0, sy1 - 10)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            sx1 = int(spot_cx - last_w / 2)
+            sy1 = int(spot_cy - last_h / 2)
+            sx2 = int(spot_cx + last_w / 2)
+            sy2 = int(spot_cy + last_h / 2)
 
-        # Highlight last person in queue (red)
-        cv2.rectangle(annotated_frame, (qx1, qy1), (qx2, qy2), (0, 0, 255), 2)
+            # Draw target spot (green, thick)
+            cv2.rectangle(annotated_frame, (sx1, sy1), (sx2, sy2), (0, 255, 0), 4)
+            cv2.putText(annotated_frame, "Spot behind",
+                        (sx1, max(0, sy1 - 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+            # Highlight last person in queue (red)
+            cv2.rectangle(annotated_frame, (qx1, qy1), (qx2, qy2), (0, 0, 255), 2)
 
     # ── Draw counter exclusion zone overlay ───────────────────────────────────
     if COUNTER_ZONE is not None:
