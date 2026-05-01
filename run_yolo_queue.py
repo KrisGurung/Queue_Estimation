@@ -39,24 +39,29 @@ def is_standing(keypoints, conf_thresh=0.3, leg_torso_ratio=0.8):
 
     # Need at least shoulders + hips to compute torso reference
     if not shoulder_ys or not hip_ys:
-        return True  # Not enough info → keep the detection
+        return False  # Not enough info → keep the detection
+
+    #KFIX1: No knees and ankle detection mean no person detected
+    if not ankle_ys or not knee_ys:
+        return False
 
     shoulder_y = sum(shoulder_ys) / len(shoulder_ys)
     hip_y      = sum(hip_ys)      / len(hip_ys)
     torso_h    = hip_y - shoulder_y
 
     if torso_h <= 0:
-        return True  # Upside-down / abnormal → keep
+        return False  # Upside-down / abnormal → keep
 
     if ankle_ys:
         leg_ref_y = sum(ankle_ys) / len(ankle_ys)
         threshold = leg_torso_ratio
+
     elif knee_ys:
         # Knees are roughly halfway down the leg, so halve the threshold
         leg_ref_y = sum(knee_ys) / len(knee_ys)
         threshold = leg_torso_ratio * 0.5
     else:
-        return True  # No lower-body keypoints → keep
+        return False  # No lower-body keypoints → keep
 
     ratio = (leg_ref_y - hip_y) / torso_h
     return ratio >= threshold
@@ -87,7 +92,7 @@ def in_counter_zone(cx: int, cy: int) -> bool:
 
 # ── Video setup ───────────────────────────────────────────────────────────────
 # KEDIT1: Input file path
-video_path = "airport.qt"
+video_path = "cafe.qt"
 cap = cv2.VideoCapture(video_path)
 assert cap.isOpened(), "Error reading video file"
 
@@ -101,7 +106,7 @@ pose_model = YOLO("yolo11n-pose.pt")
 output_dir = "runs/detect/track_queue"
 os.makedirs(output_dir, exist_ok=True)
 # KEDIT2: Writing output file path
-output_path = os.path.join(output_dir, "airport_output.avi")
+output_path = os.path.join(output_dir, "cafe_output.avi")
 out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"MJPG"), fps, (w, h))
 
 print(f"Starting queue tracking... Output will be saved to {output_path}")
@@ -232,11 +237,11 @@ while cap.isOpened():
             last_h = qy2 - qy1
 
             # ── Queue direction vector ────────────────────────────────────
-            # • First detection  → bootstrap from full queue span (front→back)
-            # • Later frames     → refine using only the last two people
-            # • Queue shrinks to 1 → keep the previously stored direction
+            # Locked once on the first frame a valid queue (≥2 people) is seen.
+            # Uses the full queue span (front → back) to establish the angle.
+            # After that, direction NEVER changes — only last_person's live
+            # position moves, keeping the "Spot behind" marker correctly angled.
             if queue_direction is None:
-                # Bootstrap on first ever valid queue
                 if len(sorted_queue) >= 2:
                     ref_person = sorted_queue[0]
                     raw_dx = last_person["cx"] - ref_person["cx"]
@@ -245,16 +250,7 @@ while cap.isOpened():
                     queue_direction = (raw_dx / length, raw_dy / length) if length > 0 else (0.0, 1.0)
                 else:
                     queue_direction = (0.0, 1.0)  # default: straight down
-            else:
-                # Refine using only the last two people in the queue
-                if len(sorted_queue) >= 2:
-                    second_last = sorted_queue[-2]
-                    raw_dx = last_person["cx"] - second_last["cx"]
-                    raw_dy = last_person["cy"] - second_last["cy"]
-                    length = math.hypot(raw_dx, raw_dy)
-                    if length > 0:
-                        queue_direction = (raw_dx / length, raw_dy / length)
-                # If len == 1: queue_direction is unchanged (held from last frame)
+            # queue_direction is intentionally not updated after first detection
 
             dx, dy = queue_direction
 
