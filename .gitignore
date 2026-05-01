@@ -1,0 +1,21 @@
+# Model weights (large binary files)
+*.pt
+
+# Video files
+*.qt
+*.avi
+*.mp4
+*.mov
+
+# Output runs directory
+runs/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+
+# Virtual environments
+venv/
+.env/
