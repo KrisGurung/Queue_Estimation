@@ -1,3 +1,6 @@
+## Test script to check accuracy of different YOLO posing models (n/m/l/x) to check accuracy of human object 
+## detection and tracker accuracy. 
+
 import cv2
 import os
 from ultralytics import YOLO

@@ -1,3 +1,5 @@
+## Main script to detect spot behind person. Current script uses coordinates to designate target zone.
+
 import cv2
 import os
 import json
