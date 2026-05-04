@@ -8,9 +8,12 @@ import argparse
 from ultralytics import YOLO
 
 parser = argparse.ArgumentParser(description="Run YOLO queue tracking with an exclusion target zone.")
-parser.add_argument("--video", type=str, default="airport.qt", help="Input video file path.")
-# parser.add_argument("--target-zone", type=int, nargs=4, default=[320, 0, 640, 250])
-parser.add_argument("--target-zone", type=int, nargs=4, default=[640, 125, 960, 375])
+# parser.add_argument("--video", type=str, default="airport.qt", help="Input video file path.")
+parser.add_argument("--video", type=str, default="cafe.qt", help="Input video file path.")
+## Cafe scenario arguments/parameters for coordinates
+parser.add_argument("--target-zone", type=int, nargs=4, default=[320, 0, 640, 250])
+## Airport scenario arguments/parameters for coordinates
+# parser.add_argument("--target-zone", type=int, nargs=4, default=[640, 125, 960, 375])
 
 parser.add_argument("--no-target-zone", action="store_true", help="Disable the target zone exclusion.")
 args = parser.parse_args()
@@ -123,13 +126,14 @@ w, h, fps = (int(cap.get(x)) for x in (
     cv2.CAP_PROP_FRAME_WIDTH, cv2.CAP_PROP_FRAME_HEIGHT, cv2.CAP_PROP_FPS))
 
 # ── Load pose model ───────────────────────────────────────────────────────────
-pose_model = YOLO("yolo11n-pose.pt")
+pose_model = YOLO("yolo11x-pose.pt")
 
 # ── Output setup ──────────────────────────────────────────────────────────────
 output_dir = "runs/detect/track_queue"
 os.makedirs(output_dir, exist_ok=True)
 # KEDIT2: Writing output file path
-output_path = os.path.join(output_dir, "airport_output.avi")
+# output_path = os.path.join(output_dir, "airport_output.avi")
+output_path = os.path.join(output_dir, "cafe_output.avi")
 out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"MJPG"), fps, (w, h))
 
 print(f"Starting queue tracking... Output will be saved to {output_path}")
